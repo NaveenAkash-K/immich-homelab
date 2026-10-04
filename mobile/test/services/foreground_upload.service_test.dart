@@ -1,5 +1,8 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart' hide isNotNull, isNull;
 import 'package:drift/native.dart';
 import 'package:flutter/services.dart';
@@ -27,6 +30,7 @@ void main() {
   late MockBackupRepository mockBackupRepository;
   late MockConnectivityApi mockConnectivityApi;
   late MockAssetMediaRepository mockAssetMediaRepository;
+  late MockLocalAssetRepository mockLocalAssetRepository;
   late Drift db;
 
   setUpAll(() async {
@@ -44,6 +48,7 @@ void main() {
 
     registerFallbackValue(File('file'));
     registerFallbackValue(<String, String>{});
+    registerFallbackValue(LocalAssetStub.image1);
   });
 
   setUp(() {
@@ -52,6 +57,8 @@ void main() {
     mockBackupRepository = MockBackupRepository();
     mockConnectivityApi = MockConnectivityApi();
     mockAssetMediaRepository = MockAssetMediaRepository();
+    mockLocalAssetRepository = MockLocalAssetRepository();
+    when(() => mockLocalAssetRepository.updateHashIfUnchanged(any(), any())).thenAnswer((_) async {});
 
     sut = ForegroundUploadService(
       mockUploadRepository,
@@ -59,6 +66,7 @@ void main() {
       mockBackupRepository,
       mockConnectivityApi,
       mockAssetMediaRepository,
+      mockLocalAssetRepository,
     );
   });
 
@@ -98,6 +106,116 @@ void main() {
     });
     return captured;
   }
+
+  group('manual upload checksum', () {
+    late Directory directory;
+    late File file;
+
+    setUp(() async {
+      directory = await Directory.systemTemp.createTemp('immich-manual-hash-');
+      file = await File('${directory.path}/photo.jpg').writeAsString('selected photo bytes');
+      final entity = MockAssetEntity();
+      when(() => entity.isLivePhoto).thenReturn(false);
+      when(() => mockStorageRepository.clearCache()).thenAnswer((_) async {});
+      when(() => mockStorageRepository.getAssetEntityForAsset(any())).thenAnswer((_) async => entity);
+      when(() => mockStorageRepository.isAssetAvailableLocally(any())).thenAnswer((_) async => true);
+      when(() => mockStorageRepository.getFileForAsset(any())).thenAnswer((_) async => file);
+      when(() => mockAssetMediaRepository.getOriginalFilename(any())).thenAnswer((_) async => 'photo.jpg');
+    });
+
+    tearDown(() async {
+      await directory.delete(recursive: true);
+    });
+
+    void answerUpload(Future<UploadResult> Function() answer) {
+      when(
+        () => mockUploadRepository.uploadFile(
+          file: any(named: 'file'),
+          originalFileName: any(named: 'originalFileName'),
+          fields: any(named: 'fields'),
+          cancelToken: any(named: 'cancelToken'),
+          onProgress: any(named: 'onProgress'),
+          logContext: any(named: 'logContext'),
+        ),
+      ).thenAnswer((_) => answer());
+    }
+
+    test('persists the selected file checksum after successful manual upload', () async {
+      captureFields();
+      final asset = LocalAssetStub.image1;
+
+      await sut.uploadManual([asset]);
+
+      verify(
+        () => mockLocalAssetRepository.updateHashIfUnchanged(
+          asset,
+          base64Encode(sha1.convert(utf8.encode('selected photo bytes')).bytes),
+        ),
+      ).called(1);
+      verifyNoMoreInteractions(mockLocalAssetRepository);
+      verifyZeroInteractions(mockBackupRepository);
+    });
+
+    test('does not persist a checksum after a failed upload', () async {
+      answerUpload(() async => UploadResult.error(errorMessage: 'upload failed'));
+
+      await sut.uploadManual([LocalAssetStub.image1]);
+
+      verifyZeroInteractions(mockLocalAssetRepository);
+    });
+
+    test('does not persist a checksum after a cancelled upload', () async {
+      answerUpload(() async => UploadResult.cancelled());
+
+      await sut.uploadManual([LocalAssetStub.image1]);
+
+      verifyZeroInteractions(mockLocalAssetRepository);
+    });
+
+    test('does not persist a stale checksum when the file changes during upload', () async {
+      answerUpload(() async {
+        await file.writeAsString('different and longer photo bytes');
+        return UploadResult.success(remoteAssetId: 'remote');
+      });
+      final succeeded = <String>[];
+
+      await sut.uploadManual([
+        LocalAssetStub.image1,
+      ], callbacks: UploadCallbacks(onSuccess: (id, _) => succeeded.add(id)));
+
+      expect(succeeded, [LocalAssetStub.image1.id]);
+      verifyZeroInteractions(mockLocalAssetRepository);
+    });
+
+    test('does not overwrite an existing checksum', () async {
+      captureFields();
+
+      await sut.uploadManual([LocalAssetStub.image1.copyWith(checksum: 'existing')]);
+
+      verifyZeroInteractions(mockLocalAssetRepository);
+    });
+
+    test('still reports successful upload when local checksum persistence fails', () async {
+      captureFields();
+      when(() => mockLocalAssetRepository.updateHashIfUnchanged(any(), any())).thenThrow(StateError('database failed'));
+      final succeeded = <String>[];
+
+      await sut.uploadManual([
+        LocalAssetStub.image1,
+      ], callbacks: UploadCallbacks(onSuccess: (id, _) => succeeded.add(id)));
+
+      expect(succeeded, [LocalAssetStub.image1.id]);
+    });
+
+    test('does not upload when already cancelled', () async {
+      final cancellation = Completer<void>()..complete();
+
+      await sut.uploadManual([LocalAssetStub.image1], cancelToken: cancellation);
+
+      verifyZeroInteractions(mockUploadRepository);
+      verifyZeroInteractions(mockLocalAssetRepository);
+    });
+  });
 
   group('uploadSingleAsset', () {
     test('should upload the motion part hidden and keep the still image visible', () async {
@@ -198,3 +316,4 @@ void main() {
     });
   });
 }
+

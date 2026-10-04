@@ -74,6 +74,21 @@ class LocalAssetRepository extends DatabaseAccessor<Drift> with $LocalAssetRepos
     });
   }
 
+  /// Do not restore a stale checksum if device sync detected an edit while uploading.
+  Future<void> updateHashIfUnchanged(LocalAsset asset, String checksum) async {
+    final query = _db.localAssetEntity.update()
+      ..where(
+        (row) =>
+            row.id.equals(asset.id) &
+            row.checksum.isNull() &
+            row.updatedAt.equals(asset.updatedAt) &
+            (asset.adjustmentTime == null
+                ? row.adjustmentTime.isNull()
+                : row.adjustmentTime.equals(asset.adjustmentTime!)),
+      );
+    await query.write(LocalAssetEntityCompanion(checksum: Value(checksum)));
+  }
+
   Future<void> deleteAssets(List<String> ids) {
     if (ids.isEmpty) {
       return Future.value();
@@ -244,3 +259,4 @@ class LocalAssetRepository extends DatabaseAccessor<Drift> with $LocalAssetRepos
     );
   }
 }
+

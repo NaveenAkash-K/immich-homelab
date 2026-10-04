@@ -1,5 +1,8 @@
+import 'package:drift/drift.dart' hide isNotNull, isNull;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/constants/enums.dart';
+import 'package:immich_mobile/data/db/main/table/local/asset.dart';
+import 'package:immich_mobile/data/db/main/table/local/asset.drift.dart';
 import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
 import 'package:immich_mobile/infrastructure/repositories/local_asset.repository.dart';
 import 'package:immich_mobile/utils/option.dart';
@@ -17,6 +20,52 @@ void main() {
 
   tearDown(() async {
     await ctx.dispose();
+  });
+
+  group('updateHashIfUnchanged', () {
+    test('associates an uploaded photo without enabling album backup', () async {
+      final user = await ctx.newUser();
+      await ctx.newAuthUser(id: user.id);
+      final local = await ctx.newLocalAsset(checksumOption: const .none());
+      final remote = await ctx.newRemoteAsset(ownerId: user.id, checksum: 'uploaded-checksum');
+      expect((await sut.get(local.id))!.storage, AssetState.local);
+
+      await sut.updateHashIfUnchanged(local.toDto(), remote.checksum);
+
+      final result = (await sut.get(local.id))!;
+      expect(result.remoteId, remote.id);
+      expect(result.storage, AssetState.merged);
+    });
+
+    test('does not overwrite a checksum saved by another task', () async {
+      final local = await ctx.newLocalAsset(checksum: 'newer-checksum');
+
+      await sut.updateHashIfUnchanged(local.toDto(), 'stale-checksum');
+
+      expect((await sut.getById(local.id))!.checksum, 'newer-checksum');
+    });
+
+    test('does not restore a checksum invalidated by a device edit', () async {
+      final local = await ctx.newLocalAsset(checksumOption: const .none());
+      await (ctx.db.update(ctx.db.localAssetEntity)..where((row) => row.id.equals(local.id))).write(
+        LocalAssetEntityCompanion(updatedAt: Value(local.updatedAt.add(const Duration(seconds: 1)))),
+      );
+
+      await sut.updateHashIfUnchanged(local.toDto(), 'stale-checksum');
+
+      expect((await sut.getById(local.id))!.checksum, isNull);
+    });
+
+    test('does not restore a checksum after an iOS adjustment changes', () async {
+      final local = await ctx.newLocalAsset(checksumOption: const .none());
+      await (ctx.db.update(ctx.db.localAssetEntity)..where((row) => row.id.equals(local.id))).write(
+        LocalAssetEntityCompanion(adjustmentTime: Value(DateTime(2026))),
+      );
+
+      await sut.updateHashIfUnchanged(local.toDto(), 'stale-checksum');
+
+      expect((await sut.getById(local.id))!.checksum, isNull);
+    });
   });
 
   group('get', () {
@@ -635,3 +684,4 @@ void main() {
     });
   });
 }
+

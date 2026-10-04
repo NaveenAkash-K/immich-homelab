@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/domain/models/asset/asset_metadata.model.dart';
@@ -12,6 +13,7 @@ import 'package:immich_mobile/extensions/network_capability_extensions.dart';
 import 'package:immich_mobile/extensions/platform_extensions.dart';
 import 'package:immich_mobile/generated/translations.g.dart';
 import 'package:immich_mobile/infrastructure/repositories/backup.repository.dart';
+import 'package:immich_mobile/infrastructure/repositories/local_asset.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/storage.repository.dart';
 import 'package:immich_mobile/platform/connectivity_api.g.dart';
@@ -43,6 +45,7 @@ final foregroundUploadServiceProvider = Provider((ref) {
     ref.watch(driftProvider).backupRepository,
     ref.watch(connectivityApiProvider),
     ref.watch(assetMediaRepositoryProvider),
+    ref.watch(driftProvider).localAssetRepository,
   );
 });
 
@@ -58,6 +61,7 @@ class ForegroundUploadService {
     this._backupRepository,
     this._connectivityApi,
     this._assetMediaRepository,
+    this._localAssetRepository,
   );
 
   final UploadRepository _uploadRepository;
@@ -65,6 +69,7 @@ class ForegroundUploadService {
   final BackupRepository _backupRepository;
   final ConnectivityApi _connectivityApi;
   final AssetMediaRepository _assetMediaRepository;
+  final LocalAssetRepository _localAssetRepository;
   final Logger _logger = Logger('ForegroundUploadService');
 
   bool shouldAbortUpload = false;
@@ -146,7 +151,7 @@ class ForegroundUploadService {
     await _executeWithWorkerPool<LocalAsset>(
       items: localAssets,
       cancelToken: cancelToken,
-      processItem: (asset) => uploadSingleAsset(asset, cancelToken, callbacks: callbacks),
+      processItem: (asset) => uploadSingleAsset(asset, cancelToken, callbacks: callbacks, computeChecksum: true),
     );
   }
 
@@ -241,6 +246,7 @@ class ForegroundUploadService {
     LocalAsset asset,
     Completer<void>? cancelToken, {
     required UploadCallbacks callbacks,
+    bool computeChecksum = false,
   }) async {
     final t = StaticTranslations.instance;
     final assetNotFoundOnDevice = CurrentPlatform.isAndroid
@@ -304,6 +310,25 @@ class ForegroundUploadService {
         _logger.warning("Failed to obtain file from iCloud for asset ${asset.id} - ${asset.name}");
         callbacks.onError?.call(asset.localId!, t.asset_not_found_on_icloud);
         return;
+      }
+
+      String? checksum;
+      FileStat? hashedFileStat;
+      if (computeChecksum && asset.checksum == null) {
+        if (cancelToken?.isCompleted ?? false) {
+          return;
+        }
+        try {
+          hashedFileStat = file.statSync();
+          checksum = base64Encode((await sha1.bind(file.openRead()).first).bytes);
+        } catch (error, stackTrace) {
+          // Hashing is only for local/server matching; do not prevent the upload
+          // if the additional read fails.
+          _logger.warning('Failed to hash manual upload ${asset.id}', error, stackTrace);
+        }
+        if (cancelToken?.isCompleted ?? false) {
+          return;
+        }
       }
 
       final fileName = await _assetMediaRepository.getOriginalFilename(asset.id) ?? asset.name;
@@ -378,6 +403,19 @@ class ForegroundUploadService {
       );
 
       if (result.isSuccess && result.remoteAssetId != null) {
+        if (checksum != null && hashedFileStat != null) {
+          try {
+            final uploadedFileStat = file.statSync();
+            if (uploadedFileStat.size == hashedFileStat.size &&
+                uploadedFileStat.modified == hashedFileStat.modified &&
+                uploadedFileStat.changed == hashedFileStat.changed) {
+              await _localAssetRepository.updateHashIfUnchanged(asset, checksum);
+            }
+          } catch (error, stackTrace) {
+            // The upload succeeded even if its local association could not be saved.
+            _logger.warning('Failed to save manual upload checksum ${asset.id}', error, stackTrace);
+          }
+        }
         callbacks.onSuccess?.call(asset.localId!, result.remoteAssetId!);
       } else if (result.isCancelled) {
         shouldAbortUpload = true;
@@ -455,3 +493,4 @@ class ForegroundUploadService {
     return true;
   }
 }
+
