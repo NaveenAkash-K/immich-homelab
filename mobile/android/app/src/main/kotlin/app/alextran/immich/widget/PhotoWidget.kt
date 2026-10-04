@@ -50,6 +50,7 @@ class PhotoWidget : GlanceAppWidget() {
           .background(GlanceTheme.colors.background)
           .clickable {
             val intent = Intent(Intent.ACTION_VIEW, deeplinkURL ?: "immich://".toUri())
+            intent.setPackage(context.packageName)
             intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
             context.startActivity(intent)
           }

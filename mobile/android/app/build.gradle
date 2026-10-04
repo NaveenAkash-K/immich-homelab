@@ -8,6 +8,8 @@ plugins {
 }
 
 def keystoreProperties = new Properties()
+def personalBuild = System.getenv("IMMICH_PERSONAL_BUILD") == "1"
+def personalKeystore = System.getenv("IMMICH_PERSONAL_KEYSTORE")
 def keystorePropertiesFile = rootProject.file('key.properties')
 if (keystorePropertiesFile.exists()) {
   keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
@@ -38,6 +40,15 @@ android {
 
   defaultConfig {
     applicationId "app.alextran.immich"
+    if (personalBuild) {
+      applicationIdSuffix '.homelab'
+      versionNameSuffix '-homelab'
+    }
+    manifestPlaceholders = [
+      immichAppLabel: personalBuild ? 'Immich Homelab' : 'Immich',
+      immichOAuthScheme: personalBuild ? 'app.immich.homelab' : 'app.immich',
+      immichVerifyLinks: personalBuild ? 'false' : 'true'
+    ]
     minSdk = 26
     targetSdk = flutter.targetSdkVersion
     versionCode flutter.versionCode
@@ -45,6 +56,17 @@ android {
   }
 
   signingConfigs {
+    if (personalBuild) {
+      if (!personalKeystore || !file(personalKeystore).exists() || !System.getenv("IMMICH_SIGNING_PASSWORD")) {
+        throw new GradleException("Personal builds require IMMICH_PERSONAL_KEYSTORE and IMMICH_SIGNING_PASSWORD")
+      }
+      personal {
+        storeFile file(personalKeystore)
+        storePassword System.getenv("IMMICH_SIGNING_PASSWORD")
+        keyAlias 'immich-personal'
+        keyPassword System.getenv("IMMICH_SIGNING_PASSWORD")
+      }
+    }
     release {
       def keyAliasVal = System.getenv("ALIAS")
       def keyPasswordVal = System.getenv("ANDROID_KEY_PASSWORD")
@@ -65,7 +87,7 @@ android {
 
     release {
       def hasKeystore = file("../key.jks").exists() && file("../key.jks").length() > 0
-      signingConfig hasKeystore ? signingConfigs.release : signingConfigs.debug
+      signingConfig personalBuild ? signingConfigs.personal : (hasKeystore ? signingConfigs.release : signingConfigs.debug)
       proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
 
       def prNumber = System.getenv("PR_NUMBER")
