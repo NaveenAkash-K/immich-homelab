@@ -493,4 +493,3 @@ class ForegroundUploadService {
     return true;
   }
 }
-

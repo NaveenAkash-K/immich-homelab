@@ -259,4 +259,3 @@ class LocalAssetRepository extends DatabaseAccessor<Drift> with $LocalAssetRepos
     );
   }
 }
-
